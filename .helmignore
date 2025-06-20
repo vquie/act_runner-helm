@@ -21,3 +21,7 @@
 .idea/
 *.tmproj
 .vscode/
+# Pre-commit
+.pre-commit-config.yaml
+# Readme templates
+READEME.md.gotmpl

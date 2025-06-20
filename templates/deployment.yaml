@@ -2,86 +2,132 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "act_runner.fullname" . }}
-  labels:
-    {{- include "act_runner.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{ include "act_runner.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ default "1" .Values.replicas }}
   {{- end }}
   selector:
-    matchLabels:
-      {{- include "act_runner.selectorLabels" . | nindent 6 }}
+    matchLabels: {{ include "act_runner.selectorLabels" . | nindent 6 }}
+  {{- with .Values.runner.updateStrategy }}
+  strategy: {{ toYaml . | nindent 4 }}
+  {{- end }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
-      annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      labels:
-        {{- include "act_runner.selectorLabels" . | nindent 8 }}
+      labels: {{ include "act_runner.selectorLabels" . | nindent 8 }}
+      annotations: {{ include "act_runner.podAnnotations" . | nindent 8 }}
     spec:
+      restartPolicy: Always
       {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "act_runner.serviceAccountName" . }}
-      securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      securityContext: {{ toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.podPriorityClassName }}
+      priorityClassName: {{ .Values.podPriorityClassName }}
+      {{- end }}
+      {{- with .Values.initContainers }}
+      initContainers: {{ toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
-          securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          {{- with (include "act_runner.securityContext" . | fromYaml) }}
+          securityContext: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}/{{ .Values.image.name }}:{{ include "act_runner.imageTag" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.runner.dockerDind.enabled }}
+          command: ["sh", "-c", "while ! nc -z localhost 2376 </dev/null; do echo 'waiting for docker daemon...'; sleep 5; done; /sbin/tini -- run.sh"]
+          {{- end }}
           env:
-            - name: DOCKER_HOST
-              value: "tcp://localhost:2375"
-            - name: DOCKER_TLS_CERTDIR
-              value: ""
-            - name: ACT_INSTANCE
-              value: {{ .Values.act_runner.instance }}
-            - name: ACT_TOKEN
+            - name: GITEA_INSTANCE_URL
+              value: {{ .Values.runner.instanceURL }}
+            - name: GITEA_RUNNER_REGISTRATION_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "act_runner.fullname" . }}-secret
-                  key: act-runner-token
-            - name: ACT_LABELS
-              value: {{ join "," .Values.act_runner.labels }}
+                  name: {{ include "act_runner.tokenSecretName" . }}
+                  key: {{ include "act_runner.tokenSecretKey" . }}
+            {{- if .Values.runner.config.enabled }}
+            - name: CONFIG_FILE
+              value: /config/config.yaml
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.lifecycle }}
+          lifecycle: {{ toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
-            - name: docker-data
-              mountPath: /shared
-            - name: {{ include "act_runner.fullname" . }}-pvc
-              mountPath: /opt/act_runner
-        - name: act-runner-dind
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath | default "/data" }}
+            {{- if .Values.runner.config.enabled }}
+            - name: config
+              mountPath: /config
+            {{- end }}
+            {{- if .Values.runner.dockerDind.enabled }}
+            - name: docker-certs
+              mountPath: /certs
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- if .Values.runner.dockerDind.enabled }}
+        - name: docker-dind
+          image: {{ .Values.runner.dockerDind.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             privileged: true
-          image: docker:23.0.0-dind
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: DOCKER_DRIVER
-              value: "overlay2"
-            - name: DOCKER_TLS_CERTDIR
-              value: ""
           volumeMounts:
-            - name: docker-data
-              mountPath: /shared
-      volumes:
-        - name: docker-data
-          emptyDir:
-        - name: {{ include "act_runner.fullname" . }}-pvc
-          persistentVolumeClaim:
-            claimName: {{ include "act_runner.fullname" . }}-pvc
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: /certs
+            - name: docker-certs
+              mountPath: /certs
+        {{- end }}
+        {{- with .Values.extraContainers }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
+      affinity: {{ toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
+      tolerations: {{ toYaml . | nindent 8 }}
       {{- end }}
+      {{- with  .Values.topologySpreadConstraints }}
+      topologySpreadConstraints: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        {{- if .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "act_runner.claimName" . }}
+        {{- end }}
+        {{- if .Values.runner.config.enabled }}
+        - name: config
+          configMap:
+            name: {{ include "act_runner.configMap" . }}
+        {{- end }}
+        {{- if .Values.runner.dockerDind.enabled }}
+        - name: docker-certs
+          emptyDir: {}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
